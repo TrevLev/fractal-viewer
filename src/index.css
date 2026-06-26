@@ -18,4 +18,6 @@ body {
   display: block;
   width: 100%;
   height: 100%;
+  cursor: grab;
+  touch-action: none; /* let us handle touch drags instead of the browser */
 }

@@ -73,6 +73,42 @@ export class FractalRenderer {
     this.view = { ...this.view, ...partial };
   }
 
+  /**
+   * Map a position in CSS pixels (relative to the canvas, top-left origin and
+   * y-down — i.e. pointer-event coordinates) to a point in the complex plane.
+   * Mirrors the mapping the fragment shader does, so JS and GLSL agree.
+   */
+  screenToComplex(cssX: number, cssY: number): [number, number] {
+    const cw = this.canvas.clientWidth;
+    const ch = this.canvas.clientHeight;
+    const nx = (cssX - 0.5 * cw) / ch;
+    const ny = (0.5 * ch - cssY) / ch; // flip y: screen is y-down, plane is y-up
+    return [
+      this.view.center[0] + nx * this.view.scale,
+      this.view.center[1] + ny * this.view.scale,
+    ];
+  }
+
+  /** Pan by a pixel delta (CSS px); the grabbed point follows the cursor. */
+  panByPixels(dxCss: number, dyCss: number): void {
+    const k = this.view.scale / this.canvas.clientHeight;
+    this.view.center[0] -= dxCss * k;
+    this.view.center[1] += dyCss * k; // flip y
+  }
+
+  /**
+   * Zoom by `factor` about a cursor position (CSS px): factor < 1 zooms in,
+   * > 1 zooms out. The complex point under the cursor stays fixed — we read it
+   * before and after changing scale, then shift the center to cancel the drift.
+   */
+  zoomAt(cssX: number, cssY: number, factor: number): void {
+    const before = this.screenToComplex(cssX, cssY);
+    this.view.scale *= factor;
+    const after = this.screenToComplex(cssX, cssY);
+    this.view.center[0] += before[0] - after[0];
+    this.view.center[1] += before[1] - after[1];
+  }
+
   /** Match the drawing buffer to the canvas's displayed size, then render. */
   resize(): void {
     const dpr = Math.min(window.devicePixelRatio || 1, this.maxDpr);
