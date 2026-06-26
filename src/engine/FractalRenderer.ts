@@ -1,5 +1,6 @@
 import vertSource from './shaders/fractal.vert.glsl?raw';
 import fragSource from './shaders/fractal.frag.glsl?raw';
+import { fromNumber, toNumber, computeReferenceOrbit } from './HighPrecision';
 
 export interface View {
   /** View center in the complex plane: [real, imaginary]. */
@@ -10,35 +11,42 @@ export interface View {
   maxIter: number;
 }
 
-const DEFAULT_VIEW: View = {
-  center: [-0.5, 0],
-  scale: 2.6,
-  maxIter: 300,
-};
+const REF_TEX_WIDTH = 1024; // reference orbit is laid out W×H in a float texture
 
 /**
- * Renders a fractal into a WebGL2 canvas.
+ * Perturbation-theory fractal renderer.
  *
- * This class is deliberately framework-agnostic: it knows nothing about React
- * or the DOM beyond the canvas it's handed. The UI layer drives it through
- * setView() / render(). When the time comes to swap in WebGPU or
- * perturbation-theory deep zoom, this is the only file that changes — the UI
- * stays put.
+ * The center is held at arbitrary precision (BigInt fixed-point) and used to
+ * compute one reference orbit per view, on the CPU. The GPU then renders every
+ * pixel as a small f32 *delta* from that reference (see the fragment shader),
+ * which is what lets zoom go far past the ~1e-6 wall of naive f32 rendering.
+ *
+ * Still framework-agnostic: driven entirely through setView() / pan / zoom /
+ * render(). The UI never touches GL or the high-precision math.
  */
 export class FractalRenderer {
   private canvas: HTMLCanvasElement;
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
   private vao: WebGLVertexArrayObject;
+  private refTexture: WebGLTexture;
 
   private uResolution: WebGLUniformLocation | null;
-  private uCenter: WebGLUniformLocation | null;
   private uScale: WebGLUniformLocation | null;
   private uMaxIter: WebGLUniformLocation | null;
+  private uRefLen: WebGLUniformLocation | null;
+  private uRefTexWidth: WebGLUniformLocation | null;
 
-  private view: View = { ...DEFAULT_VIEW };
-  private maxDpr = 2; // cap device-pixel-ratio so 4K/Retina doesn't tank perf
+  // Center is high precision; scale/maxIter are ordinary numbers (f64's range
+  // is plenty for scale — the depth limit is the GPU's f32 deltas, not this).
+  private center = { re: fromNumber(-0.5), im: fromNumber(0) };
+  private scale = 2.6;
+  private maxIter = 512;
+
+  private maxDpr = 2;
   private frameRequested = false;
+  private viewDirty = true; // reference orbit needs recomputing
+  private refLen = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', { antialias: false });
@@ -51,65 +59,96 @@ export class FractalRenderer {
     this.program = this.createProgram(vertSource, fragSource);
     gl.useProgram(this.program);
 
-    // drawArrays needs a bound VAO in WebGL2, even with no vertex attributes.
     const vao = gl.createVertexArray();
     if (!vao) throw new Error('Failed to create vertex array object.');
     this.vao = vao;
     gl.bindVertexArray(vao);
 
+    const tex = gl.createTexture();
+    if (!tex) throw new Error('Failed to create reference texture.');
+    this.refTexture = tex;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
     this.uResolution = gl.getUniformLocation(this.program, 'uResolution');
-    this.uCenter = gl.getUniformLocation(this.program, 'uCenter');
     this.uScale = gl.getUniformLocation(this.program, 'uScale');
     this.uMaxIter = gl.getUniformLocation(this.program, 'uMaxIter');
+    this.uRefLen = gl.getUniformLocation(this.program, 'uRefLen');
+    this.uRefTexWidth = gl.getUniformLocation(this.program, 'uRefTexWidth');
+
+    // The reference orbit lives on texture unit 0.
+    const uRefTex = gl.getUniformLocation(this.program, 'uRefTex');
+    gl.uniform1i(uRefTex, 0);
+    gl.uniform1i(this.uRefTexWidth, REF_TEX_WIDTH);
   }
 
-  /** Current view, as a copy (safe to mutate without touching engine state). */
   getView(): View {
-    return { ...this.view, center: [...this.view.center] };
+    return {
+      center: [toNumber(this.center.re), toNumber(this.center.im)],
+      scale: this.scale,
+      maxIter: this.maxIter,
+    };
   }
 
-  /** Merge a partial view update. Does not render — call render()/requestRender(). */
   setView(partial: Partial<View>): void {
-    this.view = { ...this.view, ...partial };
+    if (partial.center) {
+      // Absolute set (used for defaults/reset); deep precision is rebuilt by
+      // subsequent pan/zoom deltas, which accumulate exactly.
+      this.center = {
+        re: fromNumber(partial.center[0]),
+        im: fromNumber(partial.center[1]),
+      };
+    }
+    if (partial.scale !== undefined) this.scale = partial.scale;
+    if (partial.maxIter !== undefined) this.maxIter = partial.maxIter;
+    this.viewDirty = true;
   }
 
   /**
-   * Map a position in CSS pixels (relative to the canvas, top-left origin and
-   * y-down — i.e. pointer-event coordinates) to a point in the complex plane.
-   * Mirrors the mapping the fragment shader does, so JS and GLSL agree.
+   * Map a CSS-pixel position (pointer-event coords) to a point in the complex
+   * plane. Approximate at extreme depth (returns f64), but fine for read-outs.
    */
   screenToComplex(cssX: number, cssY: number): [number, number] {
     const cw = this.canvas.clientWidth;
     const ch = this.canvas.clientHeight;
     const nx = (cssX - 0.5 * cw) / ch;
-    const ny = (0.5 * ch - cssY) / ch; // flip y: screen is y-down, plane is y-up
+    const ny = (0.5 * ch - cssY) / ch;
     return [
-      this.view.center[0] + nx * this.view.scale,
-      this.view.center[1] + ny * this.view.scale,
+      toNumber(this.center.re) + nx * this.scale,
+      toNumber(this.center.im) + ny * this.scale,
     ];
   }
 
   /** Pan by a pixel delta (CSS px); the grabbed point follows the cursor. */
   panByPixels(dxCss: number, dyCss: number): void {
-    const k = this.view.scale / this.canvas.clientHeight;
-    this.view.center[0] -= dxCss * k;
-    this.view.center[1] += dyCss * k; // flip y
+    const k = this.scale / this.canvas.clientHeight;
+    // Accumulate the (small) shift into the high-precision center exactly.
+    this.center.re -= fromNumber(dxCss * k);
+    this.center.im += fromNumber(dyCss * k); // flip y
+    this.viewDirty = true;
   }
 
   /**
-   * Zoom by `factor` about a cursor position (CSS px): factor < 1 zooms in,
-   * > 1 zooms out. The complex point under the cursor stays fixed — we read it
-   * before and after changing scale, then shift the center to cancel the drift.
+   * Zoom by `factor` about a cursor position (CSS px): < 1 zooms in, > 1 out.
+   * The complex point under the cursor stays fixed. The center shift is
+   * uv·(scaleOld − scaleNew), independent of the (deep) center, so it's a small
+   * value we can fold into the high-precision center exactly.
    */
   zoomAt(cssX: number, cssY: number, factor: number): void {
-    const before = this.screenToComplex(cssX, cssY);
-    this.view.scale *= factor;
-    const after = this.screenToComplex(cssX, cssY);
-    this.view.center[0] += before[0] - after[0];
-    this.view.center[1] += before[1] - after[1];
+    const cw = this.canvas.clientWidth;
+    const ch = this.canvas.clientHeight;
+    const nx = (cssX - 0.5 * cw) / ch;
+    const ny = (0.5 * ch - cssY) / ch;
+    const dScale = this.scale - this.scale * factor;
+    this.center.re += fromNumber(nx * dScale);
+    this.center.im += fromNumber(ny * dScale);
+    this.scale *= factor;
+    this.viewDirty = true;
   }
 
-  /** Match the drawing buffer to the canvas's displayed size, then render. */
   resize(): void {
     const dpr = Math.min(window.devicePixelRatio || 1, this.maxDpr);
     const width = Math.max(1, Math.floor(this.canvas.clientWidth * dpr));
@@ -122,7 +161,6 @@ export class FractalRenderer {
     this.render();
   }
 
-  /** Coalesce multiple state changes within a frame into a single draw. */
   requestRender(): void {
     if (this.frameRequested) return;
     this.frameRequested = true;
@@ -132,23 +170,43 @@ export class FractalRenderer {
     });
   }
 
-  /** Draw immediately. */
   render(): void {
+    if (this.viewDirty) {
+      this.updateReferenceOrbit();
+      this.viewDirty = false;
+    }
     const gl = this.gl;
     gl.useProgram(this.program);
     gl.bindVertexArray(this.vao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.refTexture);
     gl.uniform2f(this.uResolution, this.canvas.width, this.canvas.height);
-    gl.uniform2f(this.uCenter, this.view.center[0], this.view.center[1]);
-    gl.uniform1f(this.uScale, this.view.scale);
-    gl.uniform1i(this.uMaxIter, this.view.maxIter);
+    gl.uniform1f(this.uScale, this.scale);
+    gl.uniform1i(this.uMaxIter, this.maxIter);
+    gl.uniform1i(this.uRefLen, this.refLen);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  /** Release GPU resources. */
   dispose(): void {
     const gl = this.gl;
     gl.deleteProgram(this.program);
     gl.deleteVertexArray(this.vao);
+    gl.deleteTexture(this.refTexture);
+  }
+
+  /** Recompute the reference orbit (CPU, high precision) and upload it. */
+  private updateReferenceOrbit(): void {
+    const orbit = computeReferenceOrbit(this.center.re, this.center.im, this.maxIter);
+    this.refLen = orbit.length;
+
+    const width = REF_TEX_WIDTH;
+    const height = Math.max(1, Math.ceil(orbit.length / width));
+    const padded = new Float32Array(width * height * 2);
+    padded.set(orbit.data);
+
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.refTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, width, height, 0, gl.RG, gl.FLOAT, padded);
   }
 
   private createProgram(vertSrc: string, fragSrc: string): WebGLProgram {
@@ -161,8 +219,6 @@ export class FractalRenderer {
     gl.attachShader(program, vert);
     gl.attachShader(program, frag);
     gl.linkProgram(program);
-
-    // The shaders are owned by the program now; flag them for cleanup.
     gl.deleteShader(vert);
     gl.deleteShader(frag);
 
