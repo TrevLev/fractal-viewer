@@ -1,6 +1,11 @@
 import vertSource from './shaders/fractal.vert.glsl?raw';
 import fragSource from './shaders/fractal.frag.glsl?raw';
-import { fromNumber, toNumber, computeReferenceOrbit } from './HighPrecision';
+import {
+  fromNumber,
+  toNumber,
+  toDecimalString,
+  computeReferenceOrbit,
+} from './HighPrecision';
 
 export interface View {
   /** View center in the complex plane: [real, imaginary]. */
@@ -11,7 +16,27 @@ export interface View {
   maxIter: number;
 }
 
+/**
+ * Display-oriented snapshot for the HUD. Distinct from `View`: coordinates are
+ * pre-formatted strings carrying the *full* precision the current zoom needs
+ * (View's f64 center is fine for round-tripping, but loses the deep digits).
+ */
+export interface Readout {
+  /** Zoom factor vs. the default view (BASE_SCALE / scale). */
+  magnification: number;
+  /** Vertical extent of the view in complex units. */
+  scale: number;
+  /** Current escape-time iteration budget. */
+  maxIter: number;
+  /** Smoothed interactive frame rate; 0 until a first interval is measured. */
+  fps: number;
+  /** Center coordinate, formatted to the precision the zoom depth warrants. */
+  centerRe: string;
+  centerIm: string;
+}
+
 const REF_TEX_WIDTH = 1024; // reference orbit is laid out W×H in a float texture
+const BASE_SCALE = 2.6; // the default, fully-zoomed-out view height
 
 /**
  * Perturbation-theory fractal renderer.
@@ -40,13 +65,20 @@ export class FractalRenderer {
   // Center is high precision; scale/maxIter are ordinary numbers (f64's range
   // is plenty for scale — the depth limit is the GPU's f32 deltas, not this).
   private center = { re: fromNumber(-0.5), im: fromNumber(0) };
-  private scale = 2.6;
+  private scale = BASE_SCALE;
   private maxIter = 512;
 
   private maxDpr = 2;
   private frameRequested = false;
   private viewDirty = true; // reference orbit needs recomputing
   private refLen = 0;
+
+  // Interactive frame-rate estimate, measured from render-to-render intervals.
+  private lastFrameTime = 0;
+  private fps = 0;
+
+  /** Optional hook fired after each rendered frame, for view read-outs (HUD). */
+  onViewChange?: (view: View) => void;
 
   constructor(canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', { antialias: false });
@@ -108,6 +140,22 @@ export class FractalRenderer {
   }
 
   /**
+   * Display snapshot for the HUD: magnification, scale, iter, fps, and the
+   * center formatted to full precision (not the f64 that getView returns).
+   */
+  getReadout(): Readout {
+    const d = this.coordDecimals();
+    return {
+      magnification: BASE_SCALE / this.scale,
+      scale: this.scale,
+      maxIter: this.maxIter,
+      fps: this.fps,
+      centerRe: toDecimalString(this.center.re, d),
+      centerIm: toDecimalString(this.center.im, d),
+    };
+  }
+
+  /**
    * Map a CSS-pixel position (pointer-event coords) to a point in the complex
    * plane. Approximate at extreme depth (returns f64), but fine for read-outs.
    */
@@ -120,6 +168,31 @@ export class FractalRenderer {
       toNumber(this.center.re) + nx * this.scale,
       toNumber(this.center.im) + ny * this.scale,
     ];
+  }
+
+  /**
+   * Absolute complex coordinate under a CSS-pixel position, as full-precision
+   * decimal strings. The pixel offset is small, so folding it into the
+   * high-precision center keeps every meaningful digit even at deep zoom.
+   */
+  complexStringAt(cssX: number, cssY: number): { re: string; im: string } {
+    const cw = this.canvas.clientWidth;
+    const ch = this.canvas.clientHeight;
+    const nx = (cssX - 0.5 * cw) / ch;
+    const ny = (0.5 * ch - cssY) / ch;
+    const re = this.center.re + fromNumber(nx * this.scale);
+    const im = this.center.im + fromNumber(ny * this.scale);
+    const d = this.coordDecimals();
+    return { re: toDecimalString(re, d), im: toDecimalString(im, d) };
+  }
+
+  /**
+   * Decimal places to show for coordinates, scaled to the current zoom depth.
+   * Capped at 76 to stay within FRAC=256's ~77-digit real resolution.
+   */
+  private coordDecimals(): number {
+    const magnification = BASE_SCALE / this.scale;
+    return Math.min(76, Math.max(6, Math.ceil(Math.log10(magnification)) + 5));
   }
 
   /** Pan by a pixel delta (CSS px); the grabbed point follows the cursor. */
@@ -171,6 +244,18 @@ export class FractalRenderer {
   }
 
   render(): void {
+    // Frame-to-frame interval -> smoothed fps. Gaps over 500ms count as idle
+    // (on-demand rendering), so we leave the last value rather than spike.
+    const now = performance.now();
+    if (this.lastFrameTime !== 0) {
+      const dt = now - this.lastFrameTime;
+      if (dt > 0 && dt < 500) {
+        const inst = 1000 / dt;
+        this.fps = this.fps === 0 ? inst : this.fps * 0.85 + inst * 0.15;
+      }
+    }
+    this.lastFrameTime = now;
+
     if (this.viewDirty) {
       this.updateReferenceOrbit();
       this.viewDirty = false;
@@ -185,6 +270,8 @@ export class FractalRenderer {
     gl.uniform1i(this.uMaxIter, this.maxIter);
     gl.uniform1i(this.uRefLen, this.refLen);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    this.onViewChange?.(this.getView());
   }
 
   dispose(): void {

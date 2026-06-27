@@ -1,0 +1,58 @@
+.hud {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  max-width: 340px;
+  padding: 10px 12px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  color: rgba(214, 228, 255, 0.92);
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  /* Click-through so the panel never eats a pan/zoom gesture... */
+  pointer-events: none;
+  user-select: none;
+}
+
+.hud-grid {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 14px;
+  row-gap: 1px;
+  width: max-content;
+}
+
+.hud-label,
+.hud-coord-label,
+.hud-axis {
+  color: rgba(214, 228, 255, 0.45);
+}
+
+.hud-value {
+  text-align: right;
+}
+
+.hud-coord {
+  margin-top: 8px;
+}
+
+.hud-num {
+  display: flex;
+  gap: 6px;
+}
+
+.hud-axis {
+  flex: none;
+}
+
+/* ...but the coordinate digits stay selectable, so a deep-zoom location can
+   actually be copied down and returned to. */
+.hud-digits {
+  pointer-events: auto;
+  user-select: text;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}

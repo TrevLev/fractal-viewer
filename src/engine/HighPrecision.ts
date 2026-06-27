@@ -30,6 +30,26 @@ function mul(a: bigint, b: bigint): bigint {
   return (a * b) >> FRAC;
 }
 
+/**
+ * Format a fixed-point value (value = a · 2^-FRAC) as a decimal string with
+ * `decimals` digits after the point, rounded half-up. This is what lets a
+ * read-out show a deep-zoom coordinate to its true precision instead of
+ * collapsing it to an f64 (~16 digits) right when the extra digits are the
+ * only thing locating you. (FRAC = 256 bits ≈ 77 meaningful decimal digits.)
+ */
+export function toDecimalString(a: bigint, decimals: number): string {
+  const neg = a < 0n;
+  const x = neg ? -a : a;
+  const pow10 = 10n ** BigInt(decimals);
+  const half = 1n << (FRAC - 1n);
+  const scaled = (x * pow10 + half) >> FRAC; // round(value · 10^decimals)
+  const sign = neg && scaled !== 0n ? '-' : '';
+  if (decimals === 0) return `${sign}${scaled}`;
+  const s = scaled.toString().padStart(decimals + 1, '0');
+  const cut = s.length - decimals;
+  return `${sign}${s.slice(0, cut)}.${s.slice(cut)}`;
+}
+
 export interface ReferenceOrbit {
   /** Flat [Zx0, Zy0, Zx1, Zy1, …] in f32-range values, one pair per iteration. */
   data: Float32Array;

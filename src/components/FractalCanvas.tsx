@@ -1,13 +1,22 @@
-import { useEffect, useRef } from 'react';
-import { FractalRenderer } from '../engine/FractalRenderer';
+import { useEffect, useRef, useState } from 'react';
+import { FractalRenderer, type Readout } from '../engine/FractalRenderer';
+import { Hud } from './Hud';
+
+interface CursorReadout {
+  re: string;
+  im: string;
+}
 
 /**
  * Owns the <canvas> and the renderer's lifecycle, and wires pointer/wheel
  * input to the engine. Stays thin: it translates DOM events into engine calls
- * (panByPixels / zoomAt) and never touches GL or the view math itself.
+ * (panByPixels / zoomAt) and feeds the engine's read-out to the HUD. It never
+ * touches GL or the view math itself.
  */
 export function FractalCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [readout, setReadout] = useState<Readout | null>(null);
+  const [cursor, setCursor] = useState<CursorReadout | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -21,9 +30,23 @@ export function FractalCanvas() {
       return;
     }
 
-    // Keep the drawing buffer in sync with the canvas's displayed size.
-    const observer = new ResizeObserver(() => renderer.resize());
+    // The engine fires this after every frame; pull a fresh display snapshot.
+    renderer.onViewChange = () => setReadout(renderer.getReadout());
+    setReadout(renderer.getReadout()); // seed before the first frame lands
+
+    // Cache the canvas rect (for cursor coords) and refresh it when geometry
+    // could have moved, instead of forcing a layout on every pointer move.
+    let rect = canvas.getBoundingClientRect();
+    const refreshRect = () => {
+      rect = canvas.getBoundingClientRect();
+    };
+
+    const observer = new ResizeObserver(() => {
+      renderer.resize();
+      refreshRect();
+    });
     observer.observe(canvas);
+    window.addEventListener('scroll', refreshRect, { passive: true });
 
     // --- drag to pan ---
     let dragging = false;
@@ -40,12 +63,14 @@ export function FractalCanvas() {
     };
 
     const onPointerMove = (e: PointerEvent) => {
-      if (!dragging) return;
-      // Pixel deltas are origin-independent, so no bounding-rect needed here.
-      renderer.panByPixels(e.clientX - lastX, e.clientY - lastY);
-      lastX = e.clientX;
-      lastY = e.clientY;
-      renderer.requestRender();
+      if (dragging) {
+        // Pixel deltas are origin-independent, so no rect needed for the pan.
+        renderer.panByPixels(e.clientX - lastX, e.clientY - lastY);
+        lastX = e.clientX;
+        lastY = e.clientY;
+        renderer.requestRender();
+      }
+      setCursor(renderer.complexStringAt(e.clientX - rect.left, e.clientY - rect.top));
     };
 
     const endDrag = (e: PointerEvent) => {
@@ -57,10 +82,13 @@ export function FractalCanvas() {
       canvas.style.cursor = 'grab';
     };
 
+    const onPointerLeave = () => {
+      if (!dragging) setCursor(null);
+    };
+
     // --- wheel to zoom, centered on the cursor ---
     const onWheel = (e: WheelEvent) => {
       e.preventDefault(); // stop the page from scrolling
-      const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       // Normalize line-mode deltas (Firefox) to roughly pixel scale.
@@ -75,18 +103,26 @@ export function FractalCanvas() {
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointercancel', endDrag);
+    canvas.addEventListener('pointerleave', onPointerLeave);
     canvas.addEventListener('wheel', onWheel, { passive: false });
 
     return () => {
       observer.disconnect();
+      window.removeEventListener('scroll', refreshRect);
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('pointerup', endDrag);
       canvas.removeEventListener('pointercancel', endDrag);
+      canvas.removeEventListener('pointerleave', onPointerLeave);
       canvas.removeEventListener('wheel', onWheel);
       renderer.dispose();
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="fractal-canvas" />;
+  return (
+    <>
+      <canvas ref={canvasRef} className="fractal-canvas" />
+      <Hud readout={readout} cursor={cursor} />
+    </>
+  );
 }
