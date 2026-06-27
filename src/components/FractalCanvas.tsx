@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { FractalRenderer, type Readout } from '../engine/FractalRenderer';
-import { Hud } from './Hud';
+import {
+  FractalRenderer,
+  type Readout,
+  type ColorSettings,
+  type Snapshot,
+} from '../engine/FractalRenderer';
+import { Hud, type HudController } from './Hud';
 
 interface CursorReadout {
   re: string;
@@ -8,15 +13,19 @@ interface CursorReadout {
 }
 
 /**
- * Owns the <canvas> and the renderer's lifecycle, and wires pointer/wheel
- * input to the engine. Stays thin: it translates DOM events into engine calls
- * (panByPixels / zoomAt) and feeds the engine's read-out to the HUD. It never
- * touches GL or the view math itself.
+ * Owns the <canvas> and the renderer's lifecycle, wires pointer/wheel input to
+ * the engine, and exposes a small controller so the HUD can drive the engine
+ * (typed coordinates, iterations, color) without ever touching GL itself. The
+ * engine stays the single source of truth; React state here just mirrors it so
+ * the controls can render the current values.
  */
 export function FractalCanvas() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rendererRef = useRef<FractalRenderer | null>(null);
   const [readout, setReadout] = useState<Readout | null>(null);
   const [cursor, setCursor] = useState<CursorReadout | null>(null);
+  const [color, setColor] = useState<ColorSettings | null>(null);
+  const [maxIter, setMaxIter] = useState(512);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -29,10 +38,13 @@ export function FractalCanvas() {
       console.error('Failed to initialize fractal renderer:', err);
       return;
     }
+    rendererRef.current = renderer;
 
     // The engine fires this after every frame; pull a fresh display snapshot.
     renderer.onViewChange = () => setReadout(renderer.getReadout());
-    setReadout(renderer.getReadout()); // seed before the first frame lands
+    setReadout(renderer.getReadout());
+    setColor(renderer.getColor());
+    setMaxIter(renderer.getView().maxIter);
 
     // Cache the canvas rect (for cursor coords) and refresh it when geometry
     // could have moved, instead of forcing a layout on every pointer move.
@@ -116,13 +128,87 @@ export function FractalCanvas() {
       canvas.removeEventListener('pointerleave', onPointerLeave);
       canvas.removeEventListener('wheel', onWheel);
       renderer.dispose();
+      rendererRef.current = null;
     };
   }, []);
+
+  // Controller: UI -> engine, keeping the mirrored React state in sync so the
+  // controls always show the engine's current values.
+  const controller: HudController = {
+    setCenter(re, im) {
+      const r = rendererRef.current;
+      if (!r) return false;
+      try {
+        r.setCenter(re, im);
+      } catch {
+        return false; // unparseable coordinates — leave the view where it is
+      }
+      r.requestRender();
+      return true;
+    },
+    setMagnification(mag) {
+      const r = rendererRef.current;
+      if (!r) return;
+      r.setMagnification(mag);
+      r.requestRender();
+    },
+    setMaxIter(n) {
+      const r = rendererRef.current;
+      if (!r) return;
+      r.setMaxIter(n);
+      setMaxIter(r.getView().maxIter);
+      r.requestRender();
+    },
+    setColor(c) {
+      const r = rendererRef.current;
+      if (!r) return;
+      r.setColor(c);
+      setColor(r.getColor());
+      r.requestRender();
+    },
+    async copySnapshot() {
+      const r = rendererRef.current;
+      if (!r) return false;
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(r.getSnapshot()));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    loadSnapshotText(text) {
+      const r = rendererRef.current;
+      if (!r) return false;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        return false;
+      }
+      if (!parsed || typeof parsed !== 'object') return false;
+      try {
+        r.applySnapshot(parsed as Partial<Snapshot>);
+      } catch {
+        return false;
+      }
+      setColor(r.getColor());
+      setMaxIter(r.getView().maxIter);
+      setReadout(r.getReadout());
+      r.requestRender();
+      return true;
+    },
+  };
 
   return (
     <>
       <canvas ref={canvasRef} className="fractal-canvas" />
-      <Hud readout={readout} cursor={cursor} />
+      <Hud
+        readout={readout}
+        cursor={cursor}
+        color={color}
+        maxIter={maxIter}
+        controller={controller}
+      />
     </>
   );
 }

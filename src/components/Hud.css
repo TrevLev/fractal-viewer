@@ -2,7 +2,9 @@
   position: fixed;
   top: 12px;
   left: 12px;
-  max-width: 340px;
+  width: 264px;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
   padding: 10px 12px;
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
@@ -12,9 +14,34 @@
   border-radius: 8px;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  /* Click-through so the panel never eats a pan/zoom gesture... */
-  pointer-events: none;
   user-select: none;
+}
+
+.hud-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.hud-title {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(214, 228, 255, 0.5);
+}
+
+.hud-toggle {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  font-size: 12px;
+  color: rgba(214, 228, 255, 0.6);
+}
+.hud-toggle:hover {
+  color: rgba(214, 228, 255, 0.95);
 }
 
 .hud-grid {
@@ -22,12 +49,13 @@
   grid-template-columns: auto auto;
   column-gap: 14px;
   row-gap: 1px;
-  width: max-content;
 }
 
 .hud-label,
 .hud-coord-label,
-.hud-axis {
+.hud-axis,
+.hud-ctl-label,
+.hud-set legend {
   color: rgba(214, 228, 255, 0.45);
 }
 
@@ -35,24 +63,137 @@
   text-align: right;
 }
 
-.hud-coord {
+.hud-controls {
   margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
+.hud-set {
+  margin: 0;
+  padding: 6px 8px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.hud-set legend {
+  padding: 0 4px;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.hud-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hud-ctl-label {
+  flex: none;
+  width: 46px;
+}
+
+.hud-input,
+.hud select {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 2px 6px;
+  user-select: text;
+}
+
+.hud-input:focus,
+.hud select:focus {
+  outline: none;
+  border-color: rgba(120, 170, 255, 0.7);
+  background: rgba(120, 170, 255, 0.1);
+}
+
+.hud-mono {
+  overflow-wrap: anywhere;
+}
+
+.hud-num-input {
+  flex: 0 0 66px;
+  width: 66px;
+}
+
+.hud-load {
+  font-size: 11px;
+}
+
+/* Native dropdown popups are light-backed on most OSes. */
+.hud option {
+  color: #0b0e16;
+}
+
+.hud input[type='range'] {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 16px;
+  accent-color: rgba(120, 170, 255, 0.9);
+}
+
+.hud-ctl-val {
+  flex: 0 0 34px;
+  text-align: right;
+  color: rgba(214, 228, 255, 0.7);
+}
+
+.hud button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  padding: 3px 10px;
+  background: rgba(120, 170, 255, 0.14);
+  border: 1px solid rgba(120, 170, 255, 0.35);
+  border-radius: 4px;
+}
+.hud button:hover {
+  background: rgba(120, 170, 255, 0.24);
+}
+.hud button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.hud-buttons {
+  justify-content: flex-start;
+}
+
+.hud-coord {
+  margin-top: 2px;
+}
 .hud-num {
   display: flex;
   gap: 6px;
 }
-
 .hud-axis {
   flex: none;
 }
-
-/* ...but the coordinate digits stay selectable, so a deep-zoom location can
-   actually be copied down and returned to. */
 .hud-digits {
-  pointer-events: auto;
   user-select: text;
   overflow-wrap: anywhere;
   word-break: break-all;
+}
+
+.hud-status {
+  margin-top: 8px;
+  font-size: 11px;
+  color: rgba(150, 200, 255, 0.95);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
 }

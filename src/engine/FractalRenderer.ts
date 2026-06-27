@@ -4,9 +4,52 @@ import {
   fromNumber,
   toNumber,
   toDecimalString,
+  fromDecimalString,
   frexp,
   computeReferenceOrbit,
 } from './HighPrecision';
+
+/** How the per-pixel iteration result is turned into a scalar before the palette. */
+export type ColorMode = 'smooth' | 'angle' | 'stripe';
+
+/** Built-in palettes, by index, matching the shader's palette() function. */
+export const PALETTE_NAMES = ['spectrum', 'ember', 'ice', 'mono'] as const;
+export type PaletteName = (typeof PALETTE_NAMES)[number];
+
+export interface ColorSettings {
+  mode: ColorMode;
+  /** Index into PALETTE_NAMES. */
+  palette: number;
+  /** Gradient frequency — how fast the palette cycles. */
+  cycle: number;
+  /** Palette phase shift, in turns [0, 1). */
+  offset: number;
+  /** Stripe density (only used by the 'stripe' mode). */
+  stripe: number;
+}
+
+const COLOR_MODE_IDS: Record<ColorMode, number> = {
+  smooth: 0,
+  angle: 1,
+  stripe: 2,
+};
+
+const DEFAULT_COLOR: ColorSettings = {
+  mode: 'smooth',
+  palette: 0,
+  cycle: 0.15,
+  offset: 0.477, // ≈ 3.0 rad — reproduces the original hard-coded look
+  stripe: 4,
+};
+
+/** A fully restorable view: where you are, how deep, and how it's colored. */
+export interface Snapshot {
+  re: string;
+  im: string;
+  scale: number;
+  maxIter: number;
+  color: ColorSettings;
+}
 
 export interface View {
   /** View center in the complex plane: [real, imaginary]. */
@@ -63,16 +106,24 @@ export class FractalRenderer {
   private uMaxIter: WebGLUniformLocation | null;
   private uRefLen: WebGLUniformLocation | null;
   private uRefTexWidth: WebGLUniformLocation | null;
+  private uColorMode: WebGLUniformLocation | null;
+  private uPalette: WebGLUniformLocation | null;
+  private uCycle: WebGLUniformLocation | null;
+  private uOffset: WebGLUniformLocation | null;
+  private uStripe: WebGLUniformLocation | null;
 
   // Center is high precision; scale/maxIter are ordinary numbers (f64's range
   // is plenty for scale — the depth limit is the GPU's f32 deltas, not this).
   private center = { re: fromNumber(-0.5), im: fromNumber(0) };
   private scale = BASE_SCALE;
   private maxIter = 512;
+  private color: ColorSettings = { ...DEFAULT_COLOR };
 
   private maxDpr = 2;
   private frameRequested = false;
-  private viewDirty = true; // reference orbit needs recomputing
+  // The reference orbit is a pure function of (center, maxIter) — nothing else.
+  // Only those two changes set this; scale and color are redraw-only.
+  private orbitDirty = true;
   private refLen = 0;
 
   // Interactive frame-rate estimate, measured from render-to-render intervals.
@@ -113,6 +164,11 @@ export class FractalRenderer {
     this.uMaxIter = gl.getUniformLocation(this.program, 'uMaxIter');
     this.uRefLen = gl.getUniformLocation(this.program, 'uRefLen');
     this.uRefTexWidth = gl.getUniformLocation(this.program, 'uRefTexWidth');
+    this.uColorMode = gl.getUniformLocation(this.program, 'uColorMode');
+    this.uPalette = gl.getUniformLocation(this.program, 'uPalette');
+    this.uCycle = gl.getUniformLocation(this.program, 'uCycle');
+    this.uOffset = gl.getUniformLocation(this.program, 'uOffset');
+    this.uStripe = gl.getUniformLocation(this.program, 'uStripe');
 
     // The reference orbit lives on texture unit 0.
     const uRefTex = gl.getUniformLocation(this.program, 'uRefTex');
@@ -136,10 +192,80 @@ export class FractalRenderer {
         re: fromNumber(partial.center[0]),
         im: fromNumber(partial.center[1]),
       };
+      this.orbitDirty = true;
     }
-    if (partial.scale !== undefined) this.scale = partial.scale;
-    if (partial.maxIter !== undefined) this.maxIter = partial.maxIter;
-    this.viewDirty = true;
+    if (partial.scale !== undefined) this.scale = partial.scale; // redraw only
+    if (partial.maxIter !== undefined && partial.maxIter !== this.maxIter) {
+      this.maxIter = partial.maxIter;
+      this.orbitDirty = true;
+    }
+  }
+
+  /** Set the center from full-precision decimal strings (typed/pasted coords). */
+  setCenter(re: string, im: string): void {
+    this.center = { re: fromDecimalString(re), im: fromDecimalString(im) };
+    this.orbitDirty = true;
+  }
+
+  /** Set the view scale directly. The orbit is independent of scale (redraw only). */
+  setScale(scale: number): void {
+    if (Number.isFinite(scale) && scale > 0) this.scale = scale;
+  }
+
+  /** Set zoom as a magnification factor vs. the default view. */
+  setMagnification(mag: number): void {
+    if (Number.isFinite(mag) && mag > 0) this.scale = BASE_SCALE / mag;
+  }
+
+  /** Set the escape-time iteration budget. Changes the orbit length. */
+  setMaxIter(n: number): void {
+    const v = Math.max(1, Math.floor(n));
+    if (v !== this.maxIter) {
+      this.maxIter = v;
+      this.orbitDirty = true;
+    }
+  }
+
+  getColor(): ColorSettings {
+    return { ...this.color };
+  }
+
+  /** Update coloring. Never rebuilds the orbit — this is a redraw-only path. */
+  setColor(partial: Partial<ColorSettings>): void {
+    this.color = { ...this.color, ...partial };
+  }
+
+  /** A fully restorable snapshot of the current view (for save / clipboard). */
+  getSnapshot(): Snapshot {
+    const d = this.coordDecimals();
+    return {
+      re: toDecimalString(this.center.re, d),
+      im: toDecimalString(this.center.im, d),
+      scale: this.scale,
+      maxIter: this.maxIter,
+      color: { ...this.color },
+    };
+  }
+
+  /** Restore from a (possibly partial, possibly untrusted) snapshot. */
+  applySnapshot(s: Partial<Snapshot>): void {
+    if (typeof s.re === 'string' && typeof s.im === 'string') {
+      this.setCenter(s.re, s.im);
+    }
+    if (typeof s.scale === 'number') this.setScale(s.scale);
+    if (typeof s.maxIter === 'number') this.setMaxIter(s.maxIter);
+    if (s.color && typeof s.color === 'object') {
+      const c = s.color;
+      const next: Partial<ColorSettings> = {};
+      if (c.mode === 'smooth' || c.mode === 'angle' || c.mode === 'stripe') {
+        next.mode = c.mode;
+      }
+      if (typeof c.palette === 'number') next.palette = c.palette;
+      if (typeof c.cycle === 'number') next.cycle = c.cycle;
+      if (typeof c.offset === 'number') next.offset = c.offset;
+      if (typeof c.stripe === 'number') next.stripe = c.stripe;
+      this.setColor(next);
+    }
   }
 
   /**
@@ -156,21 +282,6 @@ export class FractalRenderer {
       centerRe: toDecimalString(this.center.re, d),
       centerIm: toDecimalString(this.center.im, d),
     };
-  }
-
-  /**
-   * Map a CSS-pixel position (pointer-event coords) to a point in the complex
-   * plane. Approximate at extreme depth (returns f64), but fine for read-outs.
-   */
-  screenToComplex(cssX: number, cssY: number): [number, number] {
-    const cw = this.canvas.clientWidth;
-    const ch = this.canvas.clientHeight;
-    const nx = (cssX - 0.5 * cw) / ch;
-    const ny = (0.5 * ch - cssY) / ch;
-    return [
-      toNumber(this.center.re) + nx * this.scale,
-      toNumber(this.center.im) + ny * this.scale,
-    ];
   }
 
   /**
@@ -204,7 +315,7 @@ export class FractalRenderer {
     // Accumulate the (small) shift into the high-precision center exactly.
     this.center.re -= fromNumber(dxCss * k);
     this.center.im += fromNumber(dyCss * k); // flip y
-    this.viewDirty = true;
+    this.orbitDirty = true;
   }
 
   /**
@@ -222,7 +333,7 @@ export class FractalRenderer {
     this.center.re += fromNumber(nx * dScale);
     this.center.im += fromNumber(ny * dScale);
     this.scale *= factor;
-    this.viewDirty = true;
+    this.orbitDirty = true;
   }
 
   resize(): void {
@@ -259,9 +370,9 @@ export class FractalRenderer {
     }
     this.lastFrameTime = now;
 
-    if (this.viewDirty) {
+    if (this.orbitDirty) {
       this.updateReferenceOrbit();
-      this.viewDirty = false;
+      this.orbitDirty = false;
     }
     const gl = this.gl;
     gl.useProgram(this.program);
@@ -275,6 +386,12 @@ export class FractalRenderer {
     gl.uniform1i(this.uScaleE, s.exponent);
     gl.uniform1i(this.uMaxIter, this.maxIter);
     gl.uniform1i(this.uRefLen, this.refLen);
+    // Coloring (redraw-only; never touches the reference orbit).
+    gl.uniform1i(this.uColorMode, COLOR_MODE_IDS[this.color.mode]);
+    gl.uniform1i(this.uPalette, this.color.palette);
+    gl.uniform1f(this.uCycle, this.color.cycle);
+    gl.uniform1f(this.uOffset, this.color.offset);
+    gl.uniform1f(this.uStripe, this.color.stripe);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     this.onViewChange?.(this.getView());

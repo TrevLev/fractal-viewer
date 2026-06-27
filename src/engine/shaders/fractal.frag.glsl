@@ -9,6 +9,12 @@ uniform sampler2D uRefTex;       // reference orbit: RG = (Zx, Zy) per iteration
 uniform int       uRefLen;
 uniform int       uRefTexWidth;
 
+uniform int   uColorMode;  // 0 = smooth iter, 1 = escape angle, 2 = stripe average
+uniform int   uPalette;    // palette index (see paletteColor)
+uniform float uCycle;      // gradient frequency
+uniform float uOffset;     // palette phase, in turns
+uniform float uStripe;     // stripe density (mode 2 only)
+
 out vec4 fragColor;
 
 // ---------------------------------------------------------------------------
@@ -57,6 +63,19 @@ vec2 fetchRef(int i) {
   return texelFetch(uRefTex, ivec2(i % uRefTexWidth, i / uRefTexWidth), 0).xy;
 }
 
+const float TAU = 6.2831853;
+
+// Cosine palette (Inigo Quilez style): a per-channel phase selects the palette;
+// `x` is the final argument in radians. Palette 0 reproduces the original look.
+vec3 paletteColor(float x, int pal) {
+  vec3 ph;
+  if (pal == 1)      ph = vec3(0.0, 0.8, 1.6);   // ember  (warm)
+  else if (pal == 2) ph = vec3(4.0, 4.6, 5.4);   // ice    (cool)
+  else if (pal == 3) ph = vec3(0.0, 0.0, 0.0);   // mono   (grayscale)
+  else               ph = vec3(0.0, 0.6, 1.0);   // spectrum (default)
+  return 0.5 + 0.5 * cos(x + ph);
+}
+
 void main() {
   vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution) / uResolution.y;
   // δc = uv · scale, as floatexp. uv·mantissa is O(1); the deep magnitude rides
@@ -67,6 +86,14 @@ void main() {
   int  m  = 0;
   bool  escaped = false;
   float sIter   = 0.0;
+  vec2  zEsc    = vec2(0.0);    // full z at escape (for angle coloring)
+
+  // Stripe-average accumulators (mode 2): running mean of a sine of the orbit
+  // angle. We keep the previous sum too, to interpolate across the escape using
+  // the same fractional iteration that smooths the count — otherwise it bands.
+  float stripeSum  = 0.0;
+  float stripePrev = 0.0;
+  int   stripeN    = 0;
 
   for (int n = 0; n < uMaxIter; n++) {
     vec2 Z = fetchRef(m);
@@ -80,8 +107,15 @@ void main() {
     vec2  z   = fe_toF32(zFE);
     float zz  = dot(z, z);
 
+    // Accumulate the stripe term from the full orbit point (guarded at 0).
+    float ang = zz > 1e-20 ? atan(z.y, z.x) : 0.0;
+    stripePrev = stripeSum;
+    stripeSum += 0.5 + 0.5 * sin(uStripe * ang);
+    stripeN   += 1;
+
     if (zz > 65536.0) {                  // bailout |z| > 256
       sIter = float(n + 1) - log2(log2(zz)) + 4.0;
+      zEsc  = z;
       escaped = true;
       break;
     }
@@ -99,8 +133,22 @@ void main() {
   if (!escaped) {
     col = vec3(0.0);                                    // inside the set
   } else {
-    float t = sIter * 0.15;
-    col = 0.5 + 0.5 * cos(3.0 + t + vec3(0.0, 0.6, 1.0));
+    // A method-specific scalar, in "natural" units; uCycle then sets how fast
+    // the palette runs over it. The 50× on the bounded modes just brings their
+    // [0,1] range up to where uCycle behaves like it does for the iter count.
+    float natural;
+    if (uColorMode == 1) {
+      natural = (0.5 + 0.5 * atan(zEsc.y, zEsc.x) / 3.14159265) * 50.0;
+    } else if (uColorMode == 2) {
+      float frac  = fract(sIter);
+      float avgN  = stripeSum / float(stripeN);
+      float avgNm = stripeN > 1 ? stripePrev / float(stripeN - 1) : avgN;
+      natural = mix(avgNm, avgN, frac) * 50.0;
+    } else {
+      natural = sIter;                                 // smooth iteration count
+    }
+    float arg = uCycle * natural + TAU * uOffset;
+    col = paletteColor(arg, uPalette);
   }
   fragColor = vec4(col, 1.0);
 }

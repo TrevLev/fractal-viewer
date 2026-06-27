@@ -77,6 +77,39 @@ export function toDecimalString(a: bigint, decimals: number): string {
   return `${sign}${s.slice(0, cut)}.${s.slice(cut)}`;
 }
 
+/**
+ * Parse a decimal string into fixed-point — the inverse of toDecimalString.
+ * Accepts an optional sign, a decimal point, and optional scientific exponent
+ * ("-0.7436…", "1.25e-7"). This is what lets a deep-zoom coordinate be typed
+ * (or pasted) back in at full precision instead of being clamped to f64.
+ * Throws on malformed input so callers can reject it rather than navigate to 0.
+ */
+export function fromDecimalString(s: string): bigint {
+  const str = s.trim();
+  const m = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(str);
+  if (!m || (m[2] === '' && (m[3] ?? '') === '')) {
+    throw new Error(`Invalid number: "${s}"`);
+  }
+  const sign = m[1] === '-' ? -1n : 1n;
+  const intPart = m[2] ?? '';
+  const fracPart = m[3] ?? '';
+  const exp = m[4] ? parseInt(m[4], 10) : 0;
+
+  const digits = (intPart + fracPart).replace(/^0+(?=\d)/, '') || '0';
+  const n = BigInt(digits);            // unsigned magnitude, all digits
+  const pow10 = exp - fracPart.length; // value = n · 10^pow10
+  const scaled = n << FRAC;            // n · 2^FRAC
+
+  let mag: bigint;
+  if (pow10 >= 0) {
+    mag = scaled * 10n ** BigInt(pow10);
+  } else {
+    const den = 10n ** BigInt(-pow10);
+    mag = (scaled + den / 2n) / den;   // round half up
+  }
+  return sign * mag;
+}
+
 export interface ReferenceOrbit {
   /** Flat [Zx0, Zy0, Zx1, Zy1, …] in f32-range values, one pair per iteration. */
   data: Float32Array;
