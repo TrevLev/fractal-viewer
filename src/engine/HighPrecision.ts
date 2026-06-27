@@ -1,15 +1,19 @@
 // Arbitrary-precision real numbers as BigInt fixed-point: a value is stored as
 // an integer mantissa with an implicit scale of 2^-FRAC. Addition is exact
 // (just add the BigInts); multiplication shifts back down by FRAC. This is the
-// CPU-side precision that lets the reference orbit be computed correctly far
-// deeper than f64 (~1e-15) could ever reach.
+// CPU-side precision behind the reference orbit AND the precision of the view
+// center — so it sets how deep you can *navigate*, not just render.
 //
-// FRAC = 256 fractional bits ≈ 77 decimal digits — comfortably more than the
-// GPU's f32 deltas can exploit (they underflow around 1e-38), so the reference
-// is never the limiting factor at the depths this engine currently supports.
+// FRAC = 1024 fractional bits ≈ 308 decimal digits. The center's resolution is
+// 1 ULP = 2^-1024 ≈ 5.6e-309; panning works until a one-pixel step (≈ scale /
+// height) drops below that, i.e. to roughly 1e-305. (At FRAC=256 that wall was
+// ~1e-77, where sub-ULP pan steps rounded to zero and pinned the view.)
+//
+// fromNumber/toNumber are written to be valid for ANY FRAC — they never form
+// 2^FRAC as a double (which overflows to Infinity past 1023 bits).
 
-const FRAC = 256n;
-const TWO_POW_FRAC = 2 ** 256; // exact as an IEEE-754 double (256 < 1024)
+const FRAC = 1024n;
+const TWO_POW_53 = 9007199254740992; // 2^53
 
 interface Frexp {
   /** Significand in [0.5, 1) (sign-carrying), so x = mantissa · 2^exponent. */
@@ -19,8 +23,8 @@ interface Frexp {
 
 /**
  * Decompose a double into significand · 2^exponent (significand in [0.5, 1)).
- * Used to hand `scale` to the shader as a mantissa+exponent pair so a deep
- * (sub-1e-38) scale survives the trip to the GPU as a floatexp value.
+ * Used both by fromNumber and to hand `scale` to the shader as a mantissa+
+ * exponent pair so a deep (sub-1e-38) scale survives the trip to the GPU.
  */
 export function frexp(x: number): Frexp {
   if (x === 0 || !Number.isFinite(x)) return { mantissa: x, exponent: 0 };
@@ -32,21 +36,23 @@ export function frexp(x: number): Frexp {
   return { mantissa: m, exponent: e };
 }
 
-/** Convert a JS number to fixed-point, preserving its bits at its own scale. */
+/** Convert a double to fixed-point exactly, valid for any FRAC (no 2^FRAC overflow). */
 export function fromNumber(x: number): bigint {
-  if (!Number.isFinite(x) || x === 0) return 0n;
-  // x * 2^FRAC lands x's 53 mantissa bits at the correct magnitude; rounding
-  // to an integer and widening to BigInt keeps exactly those bits. Adding such
-  // a value to a wider fixed-point accumulator is then exact.
-  return BigInt(Math.round(x * TWO_POW_FRAC));
+  if (x === 0 || !Number.isFinite(x)) return 0n;
+  const { mantissa, exponent } = frexp(x);
+  const mInt = BigInt(Math.round(mantissa * TWO_POW_53)); // 53-bit integer
+  const shift = BigInt(exponent - 53) + FRAC;             // place at value·2^FRAC
+  return shift >= 0n ? mInt << shift : mInt >> -shift;
 }
 
-/** Convert fixed-point back to the nearest JS number (used for O(1) values). */
+/** Convert fixed-point back to the nearest double (for O(1) magnitudes). */
 export function toNumber(a: bigint): number {
-  return Number(a) / TWO_POW_FRAC;
+  if (a === 0n) return 0;
+  const scaled = a >> (FRAC - 53n); // ≈ value · 2^53, fits a double after Number()
+  return Number(scaled) / TWO_POW_53;
 }
 
-/** Fixed-point multiply: (a * b) >> FRAC. Floor bias is < 2^-256, negligible. */
+/** Fixed-point multiply: (a · b) >> FRAC. */
 function mul(a: bigint, b: bigint): bigint {
   return (a * b) >> FRAC;
 }
@@ -56,7 +62,7 @@ function mul(a: bigint, b: bigint): bigint {
  * `decimals` digits after the point, rounded half-up. This is what lets a
  * read-out show a deep-zoom coordinate to its true precision instead of
  * collapsing it to an f64 (~16 digits) right when the extra digits are the
- * only thing locating you. (FRAC = 256 bits ≈ 77 meaningful decimal digits.)
+ * only thing locating you.
  */
 export function toDecimalString(a: bigint, decimals: number): string {
   const neg = a < 0n;

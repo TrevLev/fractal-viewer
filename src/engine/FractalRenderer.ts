@@ -191,11 +191,11 @@ export class FractalRenderer {
 
   /**
    * Decimal places to show for coordinates, scaled to the current zoom depth.
-   * Capped at 76 to stay within FRAC=256's ~77-digit real resolution.
+   * Capped at 300 to stay within FRAC=1024's ~308-digit real resolution.
    */
   private coordDecimals(): number {
     const magnification = BASE_SCALE / this.scale;
-    return Math.min(76, Math.max(6, Math.ceil(Math.log10(magnification)) + 5));
+    return Math.min(300, Math.max(6, Math.ceil(Math.log10(magnification)) + 5));
   }
 
   /** Pan by a pixel delta (CSS px); the grabbed point follows the cursor. */
