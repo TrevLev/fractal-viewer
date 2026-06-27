@@ -4,6 +4,7 @@ import {
   fromNumber,
   toNumber,
   toDecimalString,
+  frexp,
   computeReferenceOrbit,
 } from './HighPrecision';
 
@@ -57,7 +58,8 @@ export class FractalRenderer {
   private refTexture: WebGLTexture;
 
   private uResolution: WebGLUniformLocation | null;
-  private uScale: WebGLUniformLocation | null;
+  private uScaleM: WebGLUniformLocation | null;
+  private uScaleE: WebGLUniformLocation | null;
   private uMaxIter: WebGLUniformLocation | null;
   private uRefLen: WebGLUniformLocation | null;
   private uRefTexWidth: WebGLUniformLocation | null;
@@ -106,7 +108,8 @@ export class FractalRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
     this.uResolution = gl.getUniformLocation(this.program, 'uResolution');
-    this.uScale = gl.getUniformLocation(this.program, 'uScale');
+    this.uScaleM = gl.getUniformLocation(this.program, 'uScaleM');
+    this.uScaleE = gl.getUniformLocation(this.program, 'uScaleE');
     this.uMaxIter = gl.getUniformLocation(this.program, 'uMaxIter');
     this.uRefLen = gl.getUniformLocation(this.program, 'uRefLen');
     this.uRefTexWidth = gl.getUniformLocation(this.program, 'uRefTexWidth');
@@ -266,7 +269,10 @@ export class FractalRenderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.refTexture);
     gl.uniform2f(this.uResolution, this.canvas.width, this.canvas.height);
-    gl.uniform1f(this.uScale, this.scale);
+    // Pass scale as mantissa · 2^exponent so a deep (sub-f32) scale survives.
+    const s = frexp(this.scale);
+    gl.uniform1f(this.uScaleM, s.mantissa);
+    gl.uniform1i(this.uScaleE, s.exponent);
     gl.uniform1i(this.uMaxIter, this.maxIter);
     gl.uniform1i(this.uRefLen, this.refLen);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

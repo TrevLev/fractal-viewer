@@ -11,6 +11,27 @@
 const FRAC = 256n;
 const TWO_POW_FRAC = 2 ** 256; // exact as an IEEE-754 double (256 < 1024)
 
+interface Frexp {
+  /** Significand in [0.5, 1) (sign-carrying), so x = mantissa · 2^exponent. */
+  mantissa: number;
+  exponent: number;
+}
+
+/**
+ * Decompose a double into significand · 2^exponent (significand in [0.5, 1)).
+ * Used to hand `scale` to the shader as a mantissa+exponent pair so a deep
+ * (sub-1e-38) scale survives the trip to the GPU as a floatexp value.
+ */
+export function frexp(x: number): Frexp {
+  if (x === 0 || !Number.isFinite(x)) return { mantissa: x, exponent: 0 };
+  let e = Math.ceil(Math.log2(Math.abs(x)));
+  let m = x / 2 ** e;
+  // log2 rounding can be off by one either way — clamp into [0.5, 1).
+  while (Math.abs(m) >= 1) { m /= 2; e += 1; }
+  while (Math.abs(m) < 0.5) { m *= 2; e -= 1; }
+  return { mantissa: m, exponent: e };
+}
+
 /** Convert a JS number to fixed-point, preserving its bits at its own scale. */
 export function fromNumber(x: number): bigint {
   if (!Number.isFinite(x) || x === 0) return 0n;
